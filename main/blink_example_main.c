@@ -13,17 +13,24 @@ static const char *LED_TAG = "example";
 static const char *TAG = "mpu6050_test";
 static const char *EEPROM_TAG = "eeprom";
 
-#define PIN_NUM_MOSI   6      // GPIO23 as MOSI (similar to PB3)
-#define PIN_NUM_SCLK   4      // GPIO18 as SCK (similar to PB5)
-#define PIN_NUM_CS     10       // GPIO5 as Chip Select
-#define PIN_NUM_DC     5       // GPIO4 as Data/Command
-#define PIN_NUM_RST    7       // GPIO2 as Reset
+#define PIN_NUM_MOSI   6
+#define PIN_NUM_SCLK   4
+#define PIN_NUM_CS     2 
+#define PIN_NUM_DC     1
+#define PIN_NUM_RST    0
 
 #define MPU_ADDRESS 104
 #define EEPROM_ADDR 0x50
 
 #define SDA_PIN 8
 #define SCL_PIN 9
+
+// Display dimensions
+#define SCREEN_WIDTH   132
+#define SCREEN_HEIGHT  162
+#define PIXEL_COUNT    (SCREEN_WIDTH * SCREEN_HEIGHT)  // 21,384 pixels
+
+
 
 
 
@@ -69,10 +76,18 @@ void spi_init(void) {
     };
     
     // Initialize SPI bus
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
+    esp_err_t ret = spi_bus_initialize(SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK) {
+        ESP_LOGE("SPI", "Bus initialization failed: %s", esp_err_to_name(ret));
+        return;
+    }
     
     // Add SPI device
-    ESP_ERROR_CHECK(spi_bus_add_device(SPI_HOST, &dev_cfg, &spi_handle));
+    ret = spi_bus_add_device(SPI_HOST, &dev_cfg, &spi_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE("SPI", "Device add failed: %s", esp_err_to_name(ret));
+        return;
+    }
 }
 
 // Single byte transfer
@@ -88,20 +103,17 @@ uint8_t spi_transfer(uint8_t data) {
     return 0;  // Return dummy value for compatibility
 }
 
+
 // Write command byte
 void spi_write_command(uint8_t cmd) {
     gpio_set_level(PIN_NUM_DC, 0);  // Command mode (DC LOW)
-    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
     spi_transfer(cmd);
-    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
 }
 
 // Write data byte
 void spi_write_data(uint8_t data) {
     gpio_set_level(PIN_NUM_DC, 1);  // Data mode (DC HIGH)
-    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
     spi_transfer(data);
-    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
 }
 
 // Write constant color multiple times (16-bit color)
@@ -117,7 +129,6 @@ void spi_write_x_constant_colour(uint8_t data, uint16_t x) {
     }
     
     gpio_set_level(PIN_NUM_DC, 1);  // Data mode
-    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
     
     spi_transaction_t trans = {
         .length = x * 16,      // Total bits (x * 2 bytes * 8 bits)
@@ -127,23 +138,9 @@ void spi_write_x_constant_colour(uint8_t data, uint16_t x) {
     
     ESP_ERROR_CHECK(spi_device_transmit(spi_handle, &trans));
     
-    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
     free(tx_buffer);
 }
 
-// Alternative optimized version for better performance
-void spi_write_x_constant_colour_optimized(uint8_t data, uint16_t x) {
-    gpio_set_level(PIN_NUM_DC, 1);  // Data mode
-    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
-    
-    // Transfer each byte individually for memory-constrained applications
-    for (int i = 0; i < x; i++) {
-        spi_transfer(data);
-        spi_transfer(data);
-    }
-    
-    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
-}
 
 // Reset display
 void spi_reset(void) {
@@ -169,7 +166,7 @@ void screen_init(void) {
     
     // Initialize SPI
     spi_init();
-    
+
     // Reset sequence
     spi_reset();
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -292,7 +289,6 @@ void drawRowPalleteIndexing(uint8_t* rowArray) {
     int colourID = 0;
 
     gpio_set_level(PIN_NUM_DC, 1);  // Data mode (DC HIGH)
-    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
 
     if (reverseBool == 0) {
     for (int reg = 0; reg < 160; reg++) {
@@ -320,10 +316,24 @@ void drawRowPalleteIndexing(uint8_t* rowArray) {
     }
     }
 
-    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
 
 }
 
+
+void drawBackground() {
+  spi_set_addr_window(0, 0, 161, 131);
+
+  gpio_set_level(PIN_NUM_DC, 1);  // Data mode (DC HIGH)
+
+  uint16_t color = (uint8_t) AccelY;
+
+  for (int i = 0; i < 21384; i++) {
+    spi_transfer(color>>8);
+    spi_transfer(color&(0xff));
+  }
+
+
+}
 
 
 
@@ -366,50 +376,52 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(i2cdev_init());
 
-    // Init 24LC256 eeprom i2c dev with i2cdev.h library (one level lower than mpu6050, no wrapper library)
-    // eeprom_dev.cfg.sda_io_num = SDA_PIN;
-    // eeprom_dev.cfg.scl_io_num = SCL_PIN;
-    // eeprom_dev.cfg.master.clk_speed = 400000;   // 400kHz
-    // eeprom_dev.addr = EEPROM_ADDR;
-
     // Init mpu6050 i2c dev using mpu6050.h library (wrapper library for i2cdev.h)
     ESP_ERROR_CHECK(mpu6050_init_desc(&mpu_dev, MPU_ADDRESS, 0, SDA_PIN, SCL_PIN));
     ESP_ERROR_CHECK(mpu6050_init(&mpu_dev));
+
+    // Init 24LC256 eeprom i2c dev with i2cdev.h library (one level lower than mpu6050, no wrapper library)
+    eeprom_dev.cfg.sda_io_num = SDA_PIN;
+    eeprom_dev.cfg.scl_io_num = SCL_PIN;
+    eeprom_dev.cfg.master.clk_speed = 100000;
+    eeprom_dev.addr = EEPROM_ADDR;
+
+    ESP_ERROR_CHECK(i2c_dev_create_mutex(&eeprom_dev));
 
     int offset = 0;
 
 
     // Initialize the screen
-    //screen_init();
+    screen_init();
     
 
     while (1)
     {
 
-        //eeprom_sequential_read(2080, mem_data, 640);
+        //eeprom_sequential_read_from_register(16000, mem_data, 20);
+        eeprom_sequential_read_from_register(16000 + offset, mem_data, 20);
 
-        // eeprom_sequential_read_from_register(16000 + offset, mem_data, 20);
+        // Go through each element of mem_data and split each element (byte) into its bits and print them. Print 8 elements like this on a single line then make a new line
+        for (int k = 0; k < 2; k++) {
+            for (int i = 0; i < 10; i++) {
+                for (int j = 0; j < 8; j++) {
+                    printf("%d", ((mem_data[i+(k*10)] >> (7 - j)) & 1));
+                }
+            }
+            printf("\n");
+        }
 
-        // // Go through each element of mem_data and split each element (byte) into its bits and print them. Print 8 elements like this on a single line then make a new line
-        // for (int k = 0; k < 2; k++) {
-        //     for (int i = 0; i < 10; i++) {
-        //         for (int j = 0; j < 8; j++) {
-        //             printf("%d", ((mem_data[i+(k*10)] >> (7 - j)) & 1));
-        //         }
-        //     }
-        //     printf("\n");
-        // }
-
-        // offset += 20;
+        offset += 20;
 
 
+        vTaskDelay(pdMS_TO_TICKS(100));
 
 
         AccelY = read_mpu(&mpu_dev);
         printf("%f\n", AccelY);
-        // AccelY += 48;
+        // // AccelY += 48;
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        drawBackground();
 
 
         // pos = (0.9*pos) + (0.1*AccelY);
@@ -422,7 +434,6 @@ void app_main(void)
 
 
         // eeprom_sequential_read_from_register((REG + (ROW*40)), mem_data, 160);
-        
         
         // spi_set_addr_window(0+pos, (drawImageY + ROW), 79+pos, (drawImageY + ROW+3));
         // drawRowPalleteIndexing(mem_data);
@@ -448,36 +459,37 @@ void app_main(void)
         //     } else {
         //         REG = 13440;
         //     }
-        // }
 
-        // countDown--;  // Clear the side-debris
-        // if (countDown == 0) {
+            
+            // countDown--;  // Clear the side-debris
+            // if (countDown == 0) {
 
-        //     spi_set_addr_window(0, drawImageY, pos, drawImageY + 48);
+            //     spi_set_addr_window(0, drawImageY, pos, drawImageY + 48);
 
-        //     digitalWrite(spi_DC, HIGH); // Data mode
-        //     digitalWrite(spi_CS, LOW);
-        //     for (int i = 0; i < (pos*48); i++) {
-        //     spi_transfer(0);
-        //     spi_transfer(0);
-        //     }
-        //     digitalWrite(spi_CS, HIGH);
-
-
-        //     spi_set_addr_window(pos+80, drawImageY, 160, drawImageY + 48);
-
-        //     digitalWrite(spi_DC, HIGH); // Data mode
-        //     digitalWrite(spi_CS, LOW);
-        //     for (int i = 0; i < ((80-pos)*48); i++) {
-        //     spi_transfer(0);
-        //     spi_transfer(0);  
-        //     }
-        //     digitalWrite(spi_CS, HIGH);
+            //     digitalWrite(spi_DC, HIGH); // Data mode
+            //     digitalWrite(spi_CS, LOW);
+            //     for (int i = 0; i < (pos*48); i++) {
+            //     spi_transfer(0);
+            //     spi_transfer(0);
+            //     }
+            //     digitalWrite(spi_CS, HIGH);
 
 
-        //     countDown = 4;
-        // }
+            //     spi_set_addr_window(pos+80, drawImageY, 160, drawImageY + 48);
 
-        // }
+            //     digitalWrite(spi_DC, HIGH); // Data mode
+            //     digitalWrite(spi_CS, LOW);
+            //     for (int i = 0; i < ((80-pos)*48); i++) {
+            //     spi_transfer(0);
+            //     spi_transfer(0);  
+            //     }
+            //     digitalWrite(spi_CS, HIGH);
+
+
+            //     countDown = 4;
+
+        //}
+
+
     }
 }
