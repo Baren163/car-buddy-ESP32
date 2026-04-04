@@ -22,8 +22,8 @@ static const char *EEPROM_TAG = "eeprom";
 #define MPU_ADDRESS 104
 #define EEPROM_ADDR 0x50
 
-#define SDA_PIN 8
-#define SCL_PIN 9
+#define SDA_PIN 20
+#define SCL_PIN 21
 
 // Display dimensions
 #define SCREEN_WIDTH   132
@@ -31,6 +31,7 @@ static const char *EEPROM_TAG = "eeprom";
 #define PIXEL_COUNT    (SCREEN_WIDTH * SCREEN_HEIGHT)  // 21,384 pixels
 
 static uint8_t *frame_buffer = NULL;  // DMA buffer for batch transfer
+static uint8_t *plane_buffer = NULL;
 
 // ESP32-C3 DMA max transfer is 4092 bytes
 // We'll use 4000 bytes per chunk for safety
@@ -187,6 +188,13 @@ void screen_init(void) {
         return;
     }
 
+    // Allocate DMA-capable frame buffer for plane image
+    plane_buffer = heap_caps_malloc((48*80)*2, MALLOC_CAP_DMA);
+    if (plane_buffer == NULL) {
+        ESP_LOGE("SCREEN", "Failed to allocate frame buffer!");
+        return;
+    }
+
     // Configure GPIO pins
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << PIN_NUM_CS) | 
@@ -243,78 +251,92 @@ void spi_set_addr_window(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1) {
     spi_write_command(0x2C);  // Memory write
 }
 
-void spi_transfer_colour_from_pallete(uint8_t palleteID) {
+uint16_t spi_return_colour_from_pallete(uint8_t palleteID) {
 
   switch (palleteID) {
 
     case 0:
-      spi_transfer(0x00);
-      spi_transfer(0x00);
+    //   spi_transfer(0x00);
+    //   spi_transfer(0x00);
+      return 0x0000;  // Black
       break;
 
     case 1:
-      spi_transfer(0);
-      spi_transfer(0);
+    //   spi_transfer(0);
+    //   spi_transfer(0);
+      return 0x0000;  // Black
       break;
 
     case 2:
-      spi_transfer(0xA6);
-      spi_transfer(0x18);
+    //   spi_transfer(0xA6);
+    //   spi_transfer(0x18);
+      return 0xA618;
       break;
 
     case 3:
-      spi_transfer(0x64);
-      spi_transfer(0x10);
+    //   spi_transfer(0x64);
+    //   spi_transfer(0x10);
+      return 0x6410;
       break;
 
     case 4:
-      spi_transfer(0x85);
-      spi_transfer(0x14);
+    //   spi_transfer(0x85);
+    //   spi_transfer(0x14);
+      return 0x8514;
       break;
 
     case 5:
-      spi_transfer(0xC7);
-      spi_transfer(0x1C);
+    //   spi_transfer(0xC7);
+    //   spi_transfer(0x1C);
+      return 0xC71C;
       break;
 
     case 6:
-      spi_transfer(0xE7);
-      spi_transfer(0x1C);
+    //   spi_transfer(0xE7);
+    //   spi_transfer(0x1C);
+      return 0xE71C;
       break;
 
     case 7:
-      spi_transfer(0x01);
-      spi_transfer(0x04);
+    //   spi_transfer(0x01);
+    //   spi_transfer(0x04);
+      return 0x0104;
       break;
 
     case 8:
-      spi_transfer(0x22);
-      spi_transfer(0x08);
+    //   spi_transfer(0x22);
+    //   spi_transfer(0x08);
+      return 0x2208;
       break;
 
     case 9:
-      spi_transfer(0xE5);
-      spi_transfer(0x0C);
+    //   spi_transfer(0xE5);
+    //   spi_transfer(0x0C);
+        return 0xE50C;
       break;
 
     case 10:
-      spi_transfer(0xA0);
-      spi_transfer(0x00);
+    //   spi_transfer(0xA0);
+    //   spi_transfer(0x00);
+        return 0xA000;
       break;
 
     case 11:
-      spi_transfer(0x21);
-      spi_transfer(0x04);
+    //   spi_transfer(0x21);
+    //   spi_transfer(0x04);
+        return 0x2104;
       break;
 
     case 12:
-      spi_transfer(0xC6);
-      spi_transfer(0x18);
+    //   spi_transfer(0xC6);
+    //   spi_transfer(0x18);
+        return 0xC618;
       break;
 
     default:
-      spi_transfer(0x00);
-      spi_transfer(0x00);
+    //   spi_transfer(0x00);
+    //   spi_transfer(0x00);
+        return 0x0000;  // Default to black
       break;
   }
 }
@@ -334,7 +356,7 @@ void drawRowPalleteIndexing(uint8_t* rowArray) {
         } else {
             colourID = (rowArray[reg] & 0b00001111);
         }
-        spi_transfer_colour_from_pallete((uint8_t)colourID);
+        //spi_transfer_colour_from_pallete((uint8_t)colourID);
         }
     }
     } else {
@@ -346,7 +368,7 @@ void drawRowPalleteIndexing(uint8_t* rowArray) {
             } else {
             colourID = (rowArray[(row*40) + reg] & 0b00001111);
             }
-            spi_transfer_colour_from_pallete(colourID);
+            //spi_transfer_colour_from_pallete(colourID);
         }
         }
     }
@@ -360,7 +382,7 @@ void drawBackground() {
     if (frame_buffer == NULL) return;
     
     // Set address window
-    spi_set_addr_window(0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+    spi_set_addr_window(0, 0, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1);
     
     // DC high for data mode
     gpio_set_level(PIN_NUM_DC, 1);
@@ -413,7 +435,44 @@ esp_err_t eeprom_sequential_read_from_register(uint16_t read_addr, uint8_t *data
 }
 
 
+void update_plane_buffer(uint16_t reg_index) {
+    if (plane_buffer == NULL) return;
 
+    uint16_t *buffer_16 = (uint16_t*)plane_buffer;
+
+    for (int k = 0; k < 3; k++) {
+        // Read 160 bytes from eeprom starting at reg_index into mem_data
+        eeprom_sequential_read_from_register(reg_index + (k * 160), mem_data, 160);
+
+        // Go through each element of mem_data and split each element (byte) into its bits and convert to colour then store in plane_buffer
+        int colourID = 0;
+        for (int i = 0; i < 160; i++) {
+            for (int j = 0; j < 2; j++) {
+                if (j == 0) {
+                    colourID = spi_return_colour_from_pallete(mem_data[i] >> 4);
+                } else {
+                    colourID = spi_return_colour_from_pallete(mem_data[i] & 0b00001111);
+                }
+                buffer_16[(i * 2) + j] = colourID;
+            }
+        }
+    }
+
+}
+
+
+void draw_plane_buffer() {
+    if (plane_buffer == NULL) return;
+
+    // Set address window for the plane
+    spi_set_addr_window(0, drawImageY, 79, drawImageY + 47);
+
+    // DC high for data mode
+    gpio_set_level(PIN_NUM_DC, 1);
+
+    // Send plane buffer in chunks (automatically handles splitting)
+    spi_transfer_batch(plane_buffer, (80 * 48) * 2);
+}
 
 
 void app_main(void)
@@ -437,13 +496,19 @@ void app_main(void)
 
     // Initialize the screen
     screen_init();
+
+    updateFrameBuffer(0x0000);
+    // Draw entire screen in one DMA transfer
+    drawBackground();
     
+    //update_plane_buffer(0);
+
 
     while (1)
     {
 
         //eeprom_sequential_read_from_register(16000, mem_data, 20);
-        eeprom_sequential_read_from_register(16000 + offset, mem_data, 20);
+        eeprom_sequential_read_from_register(REG, mem_data, 20);
 
         // Go through each element of mem_data and split each element (byte) into its bits and print them. Print 8 elements like this on a single line then make a new line
         for (int k = 0; k < 2; k++) {
@@ -455,23 +520,33 @@ void app_main(void)
             printf("\n");
         }
 
-        offset += 20;
-
 
 
         AccelY = read_mpu(&mpu_dev);
         printf("%f\n", AccelY);
         // // AccelY += 48;
 
-        // Update frame buffer
-        updateFrameBuffer((uint8_t)AccelY);
-        
-        // Draw entire screen in one DMA transfer
+        updateFrameBuffer(AccelY * 1000);
         drawBackground();
+
+
+
+        // I want to read the whole plane image (1920 bytes / registers) into the plane_buffer at once and then batch transfer the whole buffer using DMA.
+        // But I want to store the image into memory as its converted / indexed color. Remeber that you only actually need to update the buffer with a new
+        //plane image when the plane changes orientation.
+
+        // Read a chunk from eeprom and store in mem_data
+
+        // Go through the chunk converting each one to its color and storing it in the plane_buffer
+
+        // Draw whole plane_buffer at a certain pos
+        //draw_plane_buffer();
+        
+
 
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        // pos = (0.9*pos) + (0.1*AccelY);
+        //pos = (0.9*pos) + (0.1*AccelY);
 
         // if (pos < 40) {
         // reverseBool = 1;
@@ -490,21 +565,21 @@ void app_main(void)
         // if (ROW == 48) {
         //     ROW = 0;
         //     if (abs(pos - 40) < 5) {
-        //         REG = 0;
+        //         update_plane_buffer(0);
         //     } else if (abs(pos - 40) < 10) {
-        //         REG = 1920;
+        //         update_plane_buffer(1920);
         //     } else if (abs(pos - 40) < 15) {
-        //         REG = 3840;
+        //         update_plane_buffer(3840);
         //     } else if (abs(pos - 40) < 20) {
-        //         REG = 5760;
+        //         update_plane_buffer(5760);
         //     } else if (abs(pos - 40) < 25) {
-        //         REG = 7680;
+        //         update_plane_buffer(7680);
         //     } else if (abs(pos - 40) < 30) {
-        //         REG = 9600;
+        //         update_plane_buffer(9600);
         //     } else if (abs(pos - 40) < 35) {
-        //         REG = 11520;
+        //         update_plane_buffer(11520);
         //     } else {
-        //         REG = 13440;
+        //         update_plane_buffer(13440);
         //     }
 
             
@@ -535,7 +610,7 @@ void app_main(void)
 
             //     countDown = 4;
 
-        //}
+        // }
 
 
     }
