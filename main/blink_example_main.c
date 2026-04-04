@@ -1,0 +1,483 @@
+
+#include <stdio.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+//mpu6050 library uses i2cdev.h
+#include <mpu6050.h>
+#include <esp_err.h>
+#include "driver/spi_master.h"
+
+static const char *LED_TAG = "example";
+static const char *TAG = "mpu6050_test";
+static const char *EEPROM_TAG = "eeprom";
+
+#define PIN_NUM_MOSI   6      // GPIO23 as MOSI (similar to PB3)
+#define PIN_NUM_SCLK   4      // GPIO18 as SCK (similar to PB5)
+#define PIN_NUM_CS     10       // GPIO5 as Chip Select
+#define PIN_NUM_DC     5       // GPIO4 as Data/Command
+#define PIN_NUM_RST    7       // GPIO2 as Reset
+
+#define MPU_ADDRESS 104
+#define EEPROM_ADDR 0x50
+
+#define SDA_PIN 8
+#define SCL_PIN 9
+
+
+
+// SPI configuration
+#define SPI_HOST       SPI2_HOST  // Using SPI2 peripheral (VSPI)
+#define SPI_CLOCK_SPEED 4000000   // 4 MHz (fosc/4 equivalent for 16MHz ESP32)
+
+static spi_device_handle_t spi_handle;
+
+
+i2c_dev_t eeprom_dev;
+mpu6050_dev_t mpu_dev;
+
+
+float AccelY = 0;
+int pos = 1;
+int reverseBool = 0;
+uint16_t REG = 0;
+uint16_t ROW = 0;
+int drawImageY = 35;
+
+
+uint8_t mem_data[20];
+
+
+// Initialize SPI peripheral
+void spi_init(void) {
+    spi_bus_config_t bus_cfg = {
+        .mosi_io_num = PIN_NUM_MOSI,
+        .miso_io_num = -1,  // Not used (SPI display typically doesn't use MISO)
+        .sclk_io_num = PIN_NUM_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 4096  // Maximum transfer size
+    };
+    
+    spi_device_interface_config_t dev_cfg = {
+        .clock_speed_hz = SPI_CLOCK_SPEED,
+        .mode = 0,                    // SPI mode 0 (CPOL=0, CPHA=0)
+        .spics_io_num = PIN_NUM_CS,
+        .queue_size = 7,
+        .flags = SPI_DEVICE_HALFDUPLEX  // Half-duplex for display communication
+    };
+    
+    // Initialize SPI bus
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
+    
+    // Add SPI device
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI_HOST, &dev_cfg, &spi_handle));
+}
+
+// Single byte transfer
+uint8_t spi_transfer(uint8_t data) {
+    spi_transaction_t trans = {
+        .length = 8,          // 8 bits
+        .tx_buffer = &data,
+        .rx_buffer = NULL,    // We don't need to read back for display
+        .rxlength = 0
+    };
+    
+    ESP_ERROR_CHECK(spi_device_transmit(spi_handle, &trans));
+    return 0;  // Return dummy value for compatibility
+}
+
+// Write command byte
+void spi_write_command(uint8_t cmd) {
+    gpio_set_level(PIN_NUM_DC, 0);  // Command mode (DC LOW)
+    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
+    spi_transfer(cmd);
+    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
+}
+
+// Write data byte
+void spi_write_data(uint8_t data) {
+    gpio_set_level(PIN_NUM_DC, 1);  // Data mode (DC HIGH)
+    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
+    spi_transfer(data);
+    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
+}
+
+// Write constant color multiple times (16-bit color)
+void spi_write_x_constant_colour(uint8_t data, uint16_t x) {
+    // For 16-bit color, we need to send each color byte twice
+    uint8_t* tx_buffer = malloc(x * 2);
+    if (tx_buffer == NULL) return;
+    
+    // Fill buffer with constant color
+    for (int i = 0; i < x; i++) {
+        tx_buffer[i * 2] = data;      // High byte
+        tx_buffer[i * 2 + 1] = data;  // Low byte
+    }
+    
+    gpio_set_level(PIN_NUM_DC, 1);  // Data mode
+    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
+    
+    spi_transaction_t trans = {
+        .length = x * 16,      // Total bits (x * 2 bytes * 8 bits)
+        .tx_buffer = tx_buffer,
+        .rx_buffer = NULL
+    };
+    
+    ESP_ERROR_CHECK(spi_device_transmit(spi_handle, &trans));
+    
+    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
+    free(tx_buffer);
+}
+
+// Alternative optimized version for better performance
+void spi_write_x_constant_colour_optimized(uint8_t data, uint16_t x) {
+    gpio_set_level(PIN_NUM_DC, 1);  // Data mode
+    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
+    
+    // Transfer each byte individually for memory-constrained applications
+    for (int i = 0; i < x; i++) {
+        spi_transfer(data);
+        spi_transfer(data);
+    }
+    
+    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
+}
+
+// Reset display
+void spi_reset(void) {
+    gpio_set_level(PIN_NUM_RST, 0);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    gpio_set_level(PIN_NUM_RST, 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+}
+
+// Initialize screen with ST7735S
+void screen_init(void) {
+    // Configure GPIO pins
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << PIN_NUM_CS) | 
+                       (1ULL << PIN_NUM_DC) | 
+                       (1ULL << PIN_NUM_RST),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+    
+    // Initialize SPI
+    spi_init();
+    
+    // Reset sequence
+    spi_reset();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // ST7735S Initialization sequence
+    spi_write_command(0x01);  // Software reset
+    vTaskDelay(pdMS_TO_TICKS(150));
+    
+    spi_write_command(0x11);  // Sleep out
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    spi_write_command(0x3A);  // Interface pixel format
+    spi_write_data(0x05);     // 16-bit/pixel
+    
+    spi_write_command(0x36);  // MADCTL
+    spi_write_data(0xA0);     // 0b10100000 = MY | MV | BGR
+    
+    spi_write_command(0x38);  // Idle mode OFF
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    spi_write_command(0x29);  // Display ON
+    vTaskDelay(pdMS_TO_TICKS(100));
+}
+
+void spi_set_addr_window(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1) {
+  spi_write_command(0x2A); // Column addr set
+  spi_write_data(0x00);
+  spi_write_data(x0);
+  spi_write_data(0x00);
+  spi_write_data(x1);
+
+  spi_write_command(0x2B); // Row addr set
+  spi_write_data(0x00);
+  spi_write_data(y0);
+  spi_write_data(0x00);
+  spi_write_data(y1);
+
+  spi_write_command(0x2C); // Memory write
+}
+
+void spi_transfer_colour_from_pallete(uint8_t palleteID) {
+
+  switch (palleteID) {
+
+    case 0:
+      spi_transfer(0x00);
+      spi_transfer(0x00);
+      break;
+
+    case 1:
+      spi_transfer(0);
+      spi_transfer(0);
+      break;
+
+    case 2:
+      spi_transfer(0xA6);
+      spi_transfer(0x18);
+      break;
+
+    case 3:
+      spi_transfer(0x64);
+      spi_transfer(0x10);
+      break;
+
+    case 4:
+      spi_transfer(0x85);
+      spi_transfer(0x14);
+      break;
+
+    case 5:
+      spi_transfer(0xC7);
+      spi_transfer(0x1C);
+      break;
+
+    case 6:
+      spi_transfer(0xE7);
+      spi_transfer(0x1C);
+      break;
+
+    case 7:
+      spi_transfer(0x01);
+      spi_transfer(0x04);
+      break;
+
+    case 8:
+      spi_transfer(0x22);
+      spi_transfer(0x08);
+      break;
+
+    case 9:
+      spi_transfer(0xE5);
+      spi_transfer(0x0C);
+      break;
+
+    case 10:
+      spi_transfer(0xA0);
+      spi_transfer(0x00);
+      break;
+
+    case 11:
+      spi_transfer(0x21);
+      spi_transfer(0x04);
+      break;
+
+    case 12:
+      spi_transfer(0xC6);
+      spi_transfer(0x18);
+      break;
+
+    default:
+      spi_transfer(0x00);
+      spi_transfer(0x00);
+      break;
+  }
+}
+
+
+void drawRowPalleteIndexing(uint8_t* rowArray) {
+
+    int colourID = 0;
+
+    gpio_set_level(PIN_NUM_DC, 1);  // Data mode (DC HIGH)
+    gpio_set_level(PIN_NUM_CS, 0);  // CS LOW
+
+    if (reverseBool == 0) {
+    for (int reg = 0; reg < 160; reg++) {
+        for (int pixel = 0; pixel < 2; pixel++) {
+        if (pixel == 0) {
+            colourID = (rowArray[reg] >> 4);
+        } else {
+            colourID = (rowArray[reg] & 0b00001111);
+        }
+        spi_transfer_colour_from_pallete((uint8_t)colourID);
+        }
+    }
+    } else {
+    for (int row = 0; row < 4; row++) {
+        for (int reg = 39; reg >= 0; reg--) {
+        for (int pixel = 1; pixel >= 0; pixel--) {
+            if (pixel == 0) {
+            colourID = (rowArray[(row*40) + reg] >> 4);
+            } else {
+            colourID = (rowArray[(row*40) + reg] & 0b00001111);
+            }
+            spi_transfer_colour_from_pallete(colourID);
+        }
+        }
+    }
+    }
+
+    gpio_set_level(PIN_NUM_CS, 1);  // CS HIGH
+
+}
+
+
+
+
+float read_mpu(mpu6050_dev_t *dev)
+{
+    float temp;
+    mpu6050_raw_acceleration_t accel = { 0 };
+
+    ESP_ERROR_CHECK(mpu6050_get_raw_acceleration(dev, &accel));
+
+    // ESP_LOGI("MPU", "Accel: x=%.4f y=%.4f z=%.4f",
+    //          accel.x, accel.y, accel.z);
+    
+    return accel.y;
+}
+
+
+esp_err_t eeprom_sequential_read_from_register(uint16_t read_addr, uint8_t *data, uint16_t number_of_bytes_to_read)
+{
+    // Control byte, address HIGH byte, address LOW byte, repeated start,
+	uint8_t out_buf[2];
+	int out_index = 0;
+	uint8_t high_addr = (read_addr >> 8) & 0xff;
+	uint8_t low_addr = read_addr & 0xff;
+	out_buf[out_index++] = high_addr;
+	out_buf[out_index++] = low_addr;
+
+	//esp_err_t ret = i2c_master_transmit_receive(eeprom_dev, out_buf, sizeof(out_buf), data, number_of_bytes_to_read, -1);
+	
+    esp_err_t ret = i2c_dev_read(&eeprom_dev, out_buf, sizeof(out_buf), data, number_of_bytes_to_read);
+
+    return ret;
+}
+
+
+
+
+
+void app_main(void)
+{
+    ESP_ERROR_CHECK(i2cdev_init());
+
+    // Init 24LC256 eeprom i2c dev with i2cdev.h library (one level lower than mpu6050, no wrapper library)
+    // eeprom_dev.cfg.sda_io_num = SDA_PIN;
+    // eeprom_dev.cfg.scl_io_num = SCL_PIN;
+    // eeprom_dev.cfg.master.clk_speed = 400000;   // 400kHz
+    // eeprom_dev.addr = EEPROM_ADDR;
+
+    // Init mpu6050 i2c dev using mpu6050.h library (wrapper library for i2cdev.h)
+    ESP_ERROR_CHECK(mpu6050_init_desc(&mpu_dev, MPU_ADDRESS, 0, SDA_PIN, SCL_PIN));
+    ESP_ERROR_CHECK(mpu6050_init(&mpu_dev));
+
+    int offset = 0;
+
+
+    // Initialize the screen
+    //screen_init();
+    
+
+    while (1)
+    {
+
+        //eeprom_sequential_read(2080, mem_data, 640);
+
+        // eeprom_sequential_read_from_register(16000 + offset, mem_data, 20);
+
+        // // Go through each element of mem_data and split each element (byte) into its bits and print them. Print 8 elements like this on a single line then make a new line
+        // for (int k = 0; k < 2; k++) {
+        //     for (int i = 0; i < 10; i++) {
+        //         for (int j = 0; j < 8; j++) {
+        //             printf("%d", ((mem_data[i+(k*10)] >> (7 - j)) & 1));
+        //         }
+        //     }
+        //     printf("\n");
+        // }
+
+        // offset += 20;
+
+
+
+
+        AccelY = read_mpu(&mpu_dev);
+        printf("%f\n", AccelY);
+        // AccelY += 48;
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+
+        // pos = (0.9*pos) + (0.1*AccelY);
+
+        // if (pos < 40) {
+        // reverseBool = 1;
+        // } else {
+        // reverseBool = 0;
+        // }
+
+
+        // eeprom_sequential_read_from_register((REG + (ROW*40)), mem_data, 160);
+        
+        
+        // spi_set_addr_window(0+pos, (drawImageY + ROW), 79+pos, (drawImageY + ROW+3));
+        // drawRowPalleteIndexing(mem_data);
+
+        // ROW += 4; // Reading 160 registers so with 4 bit pallete indexing (16 unique colours) thats 320 pixels. With 80 pixels in a row thats 4 rows so we need 12 reads for a full image (48 rows)
+
+        // if (ROW == 48) {
+        //     ROW = 0;
+        //     if (abs(pos - 40) < 5) {
+        //         REG = 0;
+        //     } else if (abs(pos - 40) < 10) {
+        //         REG = 1920;
+        //     } else if (abs(pos - 40) < 15) {
+        //         REG = 3840;
+        //     } else if (abs(pos - 40) < 20) {
+        //         REG = 5760;
+        //     } else if (abs(pos - 40) < 25) {
+        //         REG = 7680;
+        //     } else if (abs(pos - 40) < 30) {
+        //         REG = 9600;
+        //     } else if (abs(pos - 40) < 35) {
+        //         REG = 11520;
+        //     } else {
+        //         REG = 13440;
+        //     }
+        // }
+
+        // countDown--;  // Clear the side-debris
+        // if (countDown == 0) {
+
+        //     spi_set_addr_window(0, drawImageY, pos, drawImageY + 48);
+
+        //     digitalWrite(spi_DC, HIGH); // Data mode
+        //     digitalWrite(spi_CS, LOW);
+        //     for (int i = 0; i < (pos*48); i++) {
+        //     spi_transfer(0);
+        //     spi_transfer(0);
+        //     }
+        //     digitalWrite(spi_CS, HIGH);
+
+
+        //     spi_set_addr_window(pos+80, drawImageY, 160, drawImageY + 48);
+
+        //     digitalWrite(spi_DC, HIGH); // Data mode
+        //     digitalWrite(spi_CS, LOW);
+        //     for (int i = 0; i < ((80-pos)*48); i++) {
+        //     spi_transfer(0);
+        //     spi_transfer(0);  
+        //     }
+        //     digitalWrite(spi_CS, HIGH);
+
+
+        //     countDown = 4;
+        // }
+
+        // }
+    }
+}
