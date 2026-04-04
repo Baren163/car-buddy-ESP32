@@ -30,9 +30,13 @@ static const char *EEPROM_TAG = "eeprom";
 #define SCREEN_HEIGHT  162
 #define PIXEL_COUNT    (SCREEN_WIDTH * SCREEN_HEIGHT)  // 21,384 pixels
 
+static uint8_t *frame_buffer = NULL;  // DMA buffer for batch transfer
 
-
-
+// ESP32-C3 DMA max transfer is 4092 bytes
+// We'll use 4000 bytes per chunk for safety
+#define MAX_DMA_TRANSFER 4000
+#define CHUNK_SIZE       (MAX_DMA_TRANSFER / 2)  // 2000 pixels per chunk
+#define NUM_CHUNKS       ((PIXEL_COUNT + CHUNK_SIZE - 1) / CHUNK_SIZE)
 
 // SPI configuration
 #define SPI_HOST       SPI2_HOST  // Using SPI2 peripheral (VSPI)
@@ -64,7 +68,7 @@ void spi_init(void) {
         .sclk_io_num = PIN_NUM_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 4096  // Maximum transfer size
+        .max_transfer_sz = MAX_DMA_TRANSFER
     };
     
     spi_device_interface_config_t dev_cfg = {
@@ -89,6 +93,29 @@ void spi_init(void) {
         return;
     }
 }
+
+
+// Batch transfer with chunking for large data
+void spi_transfer_batch(const uint8_t *data, size_t length) {
+    size_t bytes_sent = 0;
+    
+    while (bytes_sent < length) {
+        size_t chunk = length - bytes_sent;
+        if (chunk > MAX_DMA_TRANSFER) {
+            chunk = MAX_DMA_TRANSFER;
+        }
+        
+        spi_transaction_t trans = {
+            .length = chunk * 8,
+            .tx_buffer = data + bytes_sent,
+            .rx_buffer = NULL
+        };
+        
+        ESP_ERROR_CHECK(spi_device_transmit(spi_handle, &trans));
+        bytes_sent += chunk;
+    }
+}
+
 
 // Single byte transfer
 uint8_t spi_transfer(uint8_t data) {
@@ -152,6 +179,14 @@ void spi_reset(void) {
 
 // Initialize screen with ST7735S
 void screen_init(void) {
+
+    // Allocate DMA-capable frame buffer
+    frame_buffer = heap_caps_malloc(PIXEL_COUNT * 2, MALLOC_CAP_DMA);
+    if (frame_buffer == NULL) {
+        ESP_LOGE("SCREEN", "Failed to allocate frame buffer!");
+        return;
+    }
+
     // Configure GPIO pins
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << PIN_NUM_CS) | 
@@ -191,20 +226,21 @@ void screen_init(void) {
     vTaskDelay(pdMS_TO_TICKS(100));
 }
 
+// Set address window
 void spi_set_addr_window(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1) {
-  spi_write_command(0x2A); // Column addr set
-  spi_write_data(0x00);
-  spi_write_data(x0);
-  spi_write_data(0x00);
-  spi_write_data(x1);
+    spi_write_command(0x2A);  // Column address
+    spi_write_data(0x00);
+    spi_write_data(x0);
+    spi_write_data(0x00);
+    spi_write_data(x1);
 
-  spi_write_command(0x2B); // Row addr set
-  spi_write_data(0x00);
-  spi_write_data(y0);
-  spi_write_data(0x00);
-  spi_write_data(y1);
+    spi_write_command(0x2B);  // Row address
+    spi_write_data(0x00);
+    spi_write_data(y0);
+    spi_write_data(0x00);
+    spi_write_data(y1);
 
-  spi_write_command(0x2C); // Memory write
+    spi_write_command(0x2C);  // Memory write
 }
 
 void spi_transfer_colour_from_pallete(uint8_t palleteID) {
@@ -321,20 +357,28 @@ void drawRowPalleteIndexing(uint8_t* rowArray) {
 
 
 void drawBackground() {
-  spi_set_addr_window(0, 0, 161, 131);
-
-  gpio_set_level(PIN_NUM_DC, 1);  // Data mode (DC HIGH)
-
-  uint16_t color = (uint8_t) AccelY;
-
-  for (int i = 0; i < 21384; i++) {
-    spi_transfer(color>>8);
-    spi_transfer(color&(0xff));
-  }
-
-
+    if (frame_buffer == NULL) return;
+    
+    // Set address window
+    spi_set_addr_window(0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1);
+    
+    // DC high for data mode
+    gpio_set_level(PIN_NUM_DC, 1);
+    
+    // Send frame buffer in chunks (automatically handles splitting)
+    spi_transfer_batch(frame_buffer, PIXEL_COUNT * 2);
 }
 
+// Update frame buffer with new color
+void updateFrameBuffer(uint16_t color) {
+    if (frame_buffer == NULL) return;
+    
+    // Fill buffer quickly (2 bytes per pixel, 16-bit color)
+    uint16_t *buffer_16 = (uint16_t*)frame_buffer;
+    for (int i = 0; i < PIXEL_COUNT; i++) {
+        buffer_16[i] = color;
+    }
+}
 
 
 float read_mpu(mpu6050_dev_t *dev)
@@ -414,15 +458,18 @@ void app_main(void)
         offset += 20;
 
 
-        vTaskDelay(pdMS_TO_TICKS(100));
-
 
         AccelY = read_mpu(&mpu_dev);
         printf("%f\n", AccelY);
         // // AccelY += 48;
 
+        // Update frame buffer
+        updateFrameBuffer((uint8_t)AccelY);
+        
+        // Draw entire screen in one DMA transfer
         drawBackground();
 
+        vTaskDelay(pdMS_TO_TICKS(100));
 
         // pos = (0.9*pos) + (0.1*AccelY);
 
