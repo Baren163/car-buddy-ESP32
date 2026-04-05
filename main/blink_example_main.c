@@ -94,7 +94,7 @@ void spi_init(void) {
 
 
 // Batch transfer with chunking for large data
-void spi_transfer_batch(const uint8_t *data, size_t length) {
+void spi_transfer_batch(const uint8_t *data, size_t length) {   // Length in bytes
 
     // DC high for data mode
     gpio_set_level(PIN_NUM_DC, 1);
@@ -157,13 +157,7 @@ void spi_write_x_constant_colour(uint16_t data, uint16_t x) {
     
     gpio_set_level(PIN_NUM_DC, 1);  // Data mode
     
-    spi_transaction_t trans = {
-        .length = x * 16,      // Total bits (x * 2 bytes * 8 bits)
-        .tx_buffer = frame_buffer,
-        .rx_buffer = NULL
-    };
-    
-    ESP_ERROR_CHECK(spi_device_transmit(spi_handle, &trans));
+    spi_transfer_batch(frame_buffer, x * 2);
 }
 
 
@@ -500,23 +494,28 @@ void app_main(void)
     update_plane_buffer(0);
 
     int counter = 0;
+    int pos_mapped = 0;
+    float pos_integral = 0;
 
 
     while (1)
     {
 
-        draw_plane_buffer(pos);
+        draw_plane_buffer(pos_mapped);
 
         vTaskDelay(pdMS_TO_TICKS(10));
 
         AccelY = read_mpu(&mpu_dev);
+        AccelY += 500;
 
-        // Map [-17000, +17000] to [0, 90]
-        if (AccelY < -17000) AccelY = -17000;
-        if (AccelY > 17000) AccelY = 17000;
-        pos = (((int)AccelY + 17000) / 424);
+        // Map [-16000, +16000] to [0, 90]
+        if (AccelY < -16000) AccelY = -16000;
+        if (AccelY > 16000) AccelY = 16000;
+        pos = (((int)AccelY + 16000) / 424);
 
-        // pos = (0.9*pos) + (0.1*AccelY);
+        // Low pass filter to smooth out the position changes
+        pos_mapped = (pos_mapped * 1 + pos) / 2;
+
 
         if (pos < 40) {
         reverseBool = 1;
@@ -529,9 +528,9 @@ void app_main(void)
 
         if (counter >= 5) {  // Update every so often
             counter = 0;
-            if (abs(pos - 40) < 5) {
+            if (abs(pos - 40) < 4) {
                 update_plane_buffer(0);
-            } else if (abs(pos - 40) < 10) {
+            } else if (abs(pos - 40) < 8) {
                 update_plane_buffer(1920);
             } else if (abs(pos - 40) < 15) {
                 update_plane_buffer(3840);
@@ -546,37 +545,17 @@ void app_main(void)
             } else {
                 update_plane_buffer(13440);
             }
+
+            // Need to write function that clears the side debris of the plane with black
+            spi_set_addr_window(0, drawImageY, pos, drawImageY + 47);
+            spi_write_x_constant_colour(0x0000, (pos * 48));
+
+            spi_set_addr_window(pos + 80, drawImageY, 159, drawImageY + 47);
+            spi_write_x_constant_colour(0x0000, ((159 - pos) * 48));
+
         }
 
-            
-            // countDown--;  // Clear the side-debris
-            // if (countDown == 0) {
 
-            //     spi_set_addr_window(0, drawImageY, pos, drawImageY + 48);
-
-            //     digitalWrite(spi_DC, HIGH); // Data mode
-            //     digitalWrite(spi_CS, LOW);
-            //     for (int i = 0; i < (pos*48); i++) {
-            //     spi_transfer(0);
-            //     spi_transfer(0);
-            //     }
-            //     digitalWrite(spi_CS, HIGH);
-
-
-            //     spi_set_addr_window(pos+80, drawImageY, 160, drawImageY + 48);
-
-            //     digitalWrite(spi_DC, HIGH); // Data mode
-            //     digitalWrite(spi_CS, LOW);
-            //     for (int i = 0; i < ((80-pos)*48); i++) {
-            //     spi_transfer(0);
-            //     spi_transfer(0);  
-            //     }
-            //     digitalWrite(spi_CS, HIGH);
-
-
-            //     countDown = 4;
-
-        // }
 
 
     }
