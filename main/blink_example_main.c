@@ -523,35 +523,36 @@ void app_main(void)
         reverseBool = 0;
         }
 
+        // Need to write function that clears the side debris of the plane with black
+        spi_set_addr_window(0, drawImageY, pos_mapped, drawImageY + 47);
+        spi_write_x_constant_colour(0x0000, (pos_mapped * 48));
+
+        spi_set_addr_window(pos_mapped + 80, drawImageY, 159, drawImageY + 47);
+        spi_write_x_constant_colour(0x0000, ((159 - pos_mapped) * 48));
 
         counter++;
 
-        if (counter >= 5) {  // Update every so often
+        if (counter >= 2) {  // Update every so often
             counter = 0;
-            if (abs(pos - 40) < 4) {
+            if (abs(pos_mapped - 40) < 3) {
                 update_plane_buffer(0);
-            } else if (abs(pos - 40) < 8) {
+            } else if (abs(pos_mapped - 40) < 6) {
                 update_plane_buffer(1920);
-            } else if (abs(pos - 40) < 15) {
+            } else if (abs(pos_mapped - 40) < 12) {
                 update_plane_buffer(3840);
-            } else if (abs(pos - 40) < 20) {
+            } else if (abs(pos_mapped - 40) < 18) {
                 update_plane_buffer(5760);
-            } else if (abs(pos - 40) < 25) {
+            } else if (abs(pos_mapped - 40) < 23) {
                 update_plane_buffer(7680);
-            } else if (abs(pos - 40) < 30) {
+            } else if (abs(pos_mapped - 40) < 28) {
                 update_plane_buffer(9600);
-            } else if (abs(pos - 40) < 35) {
+            } else if (abs(pos_mapped - 40) < 33) {
                 update_plane_buffer(11520);
             } else {
                 update_plane_buffer(13440);
             }
 
-            // Need to write function that clears the side debris of the plane with black
-            spi_set_addr_window(0, drawImageY, pos, drawImageY + 47);
-            spi_write_x_constant_colour(0x0000, (pos * 48));
 
-            spi_set_addr_window(pos + 80, drawImageY, 159, drawImageY + 47);
-            spi_write_x_constant_colour(0x0000, ((159 - pos) * 48));
 
         }
 
