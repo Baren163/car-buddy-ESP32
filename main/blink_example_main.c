@@ -43,6 +43,8 @@ static uint8_t *plane_buffer = NULL;
 #define SPI_HOST       SPI2_HOST  // Using SPI2 peripheral (VSPI)
 #define SPI_CLOCK_SPEED 4000000   // 4 MHz (fosc/4 equivalent for 16MHz ESP32)
 
+#define COLOR16 0  // Set to 1 for 16-bit color mode
+
 static spi_device_handle_t spi_handle;
 
 
@@ -212,8 +214,13 @@ void screen_init(void) {
     spi_write_command(0x11);  // Sleep out
     vTaskDelay(pdMS_TO_TICKS(100));
     
-    spi_write_command(0x3A);  // Interface pixel format
-    spi_write_data(0x05);     // 16-bit/pixel
+    if (COLOR16) {
+        spi_write_command(0x3A);  // Interface pixel format
+        spi_write_data(0x05);     // 16-bit/pixel
+    } else {
+        spi_write_command(0x3A);  // Interface pixel format
+        spi_write_data(0x03);     // 12-bit/pixel
+    }
     
     spi_write_command(0x36);  // MADCTL
     spi_write_data(0xA0);     // 0b10100000 = MY | MV | BGR
@@ -244,106 +251,133 @@ void spi_set_addr_window(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1) {
 
 uint16_t spi_return_colour_from_pallete(uint8_t palleteID) {
 
-  switch (palleteID) {
+    uint16_t color = 0;
+        
+    switch (palleteID) {
 
-    case 0:
-    //   spi_transfer(0x00);
-    //   spi_transfer(0x00);
-      return 0x0000;  // Black
-      break;
+        case 0:
+        //   spi_transfer(0x00);
+        //   spi_transfer(0x00);
+        color = 0x0000;  // Black
+        break;
 
-    case 1:
-    //   spi_transfer(0);
-    //   spi_transfer(0);
-      return 0x0000;  // Black
-      break;
+        case 1:
+        //   spi_transfer(0);
+        //   spi_transfer(0);
+        color = 0x0000;  // Black
+        break;
 
-    case 2:
-    //   spi_transfer(0xA6);
-    //   spi_transfer(0x18);
-      return 0xA618;
-      break;
+        case 2:
+        //   spi_transfer(0xA6);
+        //   spi_transfer(0x18);
+        color = 0xA618;
+        break;
 
-    case 3:
-    //   spi_transfer(0x64);
-    //   spi_transfer(0x10);
-      return 0x6410;
-      break;
+        case 3:
+        //   spi_transfer(0x64);
+        //   spi_transfer(0x10);
+        color = 0x6410;
+        break;
 
-    case 4:
-    //   spi_transfer(0x85);
-    //   spi_transfer(0x14);
-      return 0x8514;
-      break;
+        case 4:
+        //   spi_transfer(0x85);
+        //   spi_transfer(0x14);
+        color = 0x8514;
+        break;
 
-    case 5:
-    //   spi_transfer(0xC7);
-    //   spi_transfer(0x1C);
-      return 0xC71C;
-      break;
+        case 5:
+        //   spi_transfer(0xC7);
+        //   spi_transfer(0x1C);
+        color = 0xC71C;
+        break;
 
-    case 6:
-    //   spi_transfer(0xE7);
-    //   spi_transfer(0x1C);
-      return 0xE71C;
-      break;
+        case 6:
+        //   spi_transfer(0xE7);
+        //   spi_transfer(0x1C);
+        color = 0xE71C;
+        break;
 
-    case 7:
-    //   spi_transfer(0x01);
-    //   spi_transfer(0x04);
-      return 0x0104;
-      break;
+        case 7:
+        //   spi_transfer(0x01);
+        //   spi_transfer(0x04);
+        color = 0x0104;
+        break;
 
-    case 8:
-    //   spi_transfer(0x22);
-    //   spi_transfer(0x08);
-      return 0x2208;
-      break;
+        case 8:
+        //   spi_transfer(0x22);
+        //   spi_transfer(0x08);
+        color = 0x2208;
+        break;
 
-    case 9:
-    //   spi_transfer(0xE5);
-    //   spi_transfer(0x0C);
-        return 0xE50C;
-      break;
+        case 9:
+        //   spi_transfer(0xE5);
+        //   spi_transfer(0x0C);
+            color = 0xE50C;
+        break;
 
-    case 10:
-    //   spi_transfer(0xA0);
-    //   spi_transfer(0x00);
-        return 0xA000;
-      break;
+        case 10:
+        //   spi_transfer(0xA0);
+        //   spi_transfer(0x00);
+        color = 0xA000;
+        break;
 
-    case 11:
-    //   spi_transfer(0x21);
-    //   spi_transfer(0x04);
-        return 0x2104;
-      break;
+        case 11:
+        //   spi_transfer(0x21);
+        //   spi_transfer(0x04);
+        color = 0x2104;
+        break;
 
-    case 12:
-    //   spi_transfer(0xC6);
-    //   spi_transfer(0x18);
-        return 0xC618;
-      break;
+        case 12:
+        //   spi_transfer(0xC6);
+        //   spi_transfer(0x18);
+        color = 0xC618;
+        break;
 
-    default:
-    //   spi_transfer(0x00);
-    //   spi_transfer(0x00);
-        return 0x0000;  // Default to black
-      break;
-  }
+        default:
+        //   spi_transfer(0x00);
+        //   spi_transfer(0x00);
+        color = 0x0000;  // Default to black
+        break;
+    }
+
+    if (COLOR16) {
+        return color;  // Return full 16-bit color
+    } else {
+        // Convert RGB565 (16-bit) to RGB444 (12-bit)
+        uint8_t r = (color >> 11) & 0x1F;  // 5 bits red
+        uint8_t g = (color >> 5)  & 0x3F;  // 6 bits green
+        uint8_t b =  color        & 0x1F;  // 5 bits blue
+
+        // Scale down to 4 bits each by taking the top 4 bits
+        uint16_t r4 = r >> 1;   // 5 bits → 4 bits
+        uint16_t g4 = g >> 2;   // 6 bits → 4 bits
+        uint16_t b4 = b >> 1;   // 5 bits → 4 bits
+
+        return (r4 << 8) | (g4 << 4) | b4;  // Pack into [11:8][7:4][3:0]
+    }
+
+    return color;
 }
 
 
 void drawBackground() {
     if (frame_buffer == NULL) return;
-    
+
     // Set address window
     spi_set_addr_window(0, 0, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1);
     
     // DC high for data mode
     gpio_set_level(PIN_NUM_DC, 1);
     
-    // Send frame buffer in chunks (automatically handles splitting)
-    spi_transfer_batch(frame_buffer, PIXEL_COUNT * 2);
+
+    if (COLOR16) {
+        // Send frame buffer in chunks (automatically handles splitting)
+        spi_transfer_batch(frame_buffer, PIXEL_COUNT * 2);
+    } else {
+        // Display in 12 bit color mode
+        // Don't send odd number of pixels
+        spi_transfer_batch(frame_buffer, (PIXEL_COUNT / 2) * 3);
+    }
 }
 
 // Update frame buffer with new color
@@ -395,7 +429,7 @@ void update_plane_buffer(uint16_t reg_index) {
         return;
     }
 
-    // Read packed data into the START of plane_buffer (1920 bytes used, rest untouched for now)
+    // Read packed data into the START of plane_buffer
     eeprom_sequential_read_from_register(reg_index, plane_buffer, 1920);
 
     uint8_t packed, colorID;
@@ -405,12 +439,26 @@ void update_plane_buffer(uint16_t reg_index) {
         // Iterate backwards so writes never clobber unread packed bytes
         for (int i = ((48 * 80) / 2) - 1; i >= 0; i--) {
             packed = plane_buffer[i];  // Read packed byte BEFORE it gets overwritten
-            for (int pixel = 1; pixel >= 0; pixel--) {
-                colorID = (pixel == 0) ? (packed >> 4) : (packed & 0x0F);
-                color = spi_return_colour_from_pallete(colorID);
+            
+            uint16_t color0, color1;
+            uint8_t colorID;
+            
+            colorID = (packed >> 4) & 0x0F;
+            color0 = spi_return_colour_from_pallete(colorID);  // Automatically changes between 12-bit and 16-bit color based on COLOR16 define
 
-                plane_buffer[(i * 4) + (pixel * 2)]     = (color >> 8) & 0xFF;  // High byte
-                plane_buffer[(i * 4) + (pixel * 2) + 1] =  color & 0xFF;        // Low byte
+            colorID = packed & 0x0F;
+            color1 = spi_return_colour_from_pallete(colorID);  // Automatically changes between 12-bit and 16-bit color based on COLOR16 define
+
+            if (COLOR16) {
+                plane_buffer[(i * 4)]     = (color0 >> 8) & 0xFF;  // High byte color0
+                plane_buffer[(i * 4) + 1] =  color0 & 0xFF;        // Low byte color0
+                plane_buffer[(i * 4) + 2] = (color1 >> 8) & 0xFF;  // High byte color1
+                plane_buffer[(i * 4) + 3] =  color1 & 0xFF;        // Low byte color1
+            } else {
+                // Pack two 12-bit colors into 3 bytes
+                plane_buffer[(i * 3)]     =  (color0 >> 4) & 0xFF;          // P0 bits [11:4]
+                plane_buffer[(i * 3) + 1] = ((color0 & 0x0F) << 4) | ((color1 >> 8) & 0x0F);  // P0[3:0] | P1[11:8]
+                plane_buffer[(i * 3) + 2] =   color1 & 0xFF;                // P1 bits [7:0]
             }
         }
     } else {
@@ -427,25 +475,56 @@ void update_plane_buffer(uint16_t reg_index) {
                 // Now we can safely write to the plane_buffer without worrying about clobbering unread data
                  for (int j = 0; j < 80/2; j++) {
                     packed = temp_buffer[j];
-                    for (int pixel = 1; pixel >= 0; pixel--) {
-                        colorID = (pixel == 1) ? (packed >> 4) : (packed & 0x0F);   // Flip pixel order for mirroring
-                        color = spi_return_colour_from_pallete(colorID);
+                    uint16_t color0, color1;
+                    uint8_t colorID;
+                    
+                    // Flip pixel order for mirroring
+                    colorID = (packed >> 4) & 0x0F;
+                    color1 = spi_return_colour_from_pallete(colorID);  // Automatically changes between 12-bit and 16-bit color based on COLOR16 define
 
-                        plane_buffer[(i * 160) + ((39-j) * 4) + (pixel * 2)]     = (color >> 8) & 0xFF;  // High byte
-                        plane_buffer[(i * 160) + ((39-j) * 4) + (pixel * 2) + 1] =  color & 0xFF;        // Low byte
+                    colorID = packed & 0x0F;
+                    color0 = spi_return_colour_from_pallete(colorID);  // Automatically changes between 12-bit and 16-bit color based on COLOR16 define
+
+                    if (COLOR16) {
+                        plane_buffer[(i * 160) + ((39-j) * 4)]     = (color0 >> 8) & 0xFF;  // High byte
+                        plane_buffer[(i * 160) + ((39-j) * 4) + 1] =  color0 & 0xFF;        // Low byte
+                        plane_buffer[(i * 160) + ((39-j) * 4) + 2] = (color1 >> 8) & 0xFF;  // High byte
+                        plane_buffer[(i * 160) + ((39-j) * 4) + 3] =  color1 & 0xFF;        // Low byte
+                    } else {
+                        // Pack two 12-bit colors into 3 bytes
+                        plane_buffer[(i * 120) + ((39-j) * 3)]     =  (color0 >> 4) & 0xFF;          // P0 bits [11:4]
+                        plane_buffer[(i * 120) + ((39-j) * 3) + 1] = ((color0 & 0x0F) << 4) | ((color1 >> 8) & 0x0F);  // P0[3:0] | P1[11:8]
+                        plane_buffer[(i * 120) + ((39-j) * 3) + 2] =   color1 & 0xFF;                // P1 bits [7:0]
                     }
+
+
                 }
                 break;  // We've processed the first row, we can break out of the loop now
             }
 
             for (int j = 0; j < 80/2; j++) {
                 packed = plane_buffer[(i * 40) + j];
-                for (int pixel = 1; pixel >= 0; pixel--) {
-                    colorID = (pixel == 1) ? (packed >> 4) : (packed & 0x0F);   // Flip pixel order for mirroring
-                    color = spi_return_colour_from_pallete(colorID);
 
-                    plane_buffer[(i * 160) + ((39-j) * 4) + (pixel * 2)]     = (color >> 8) & 0xFF;  // High byte
-                    plane_buffer[(i * 160) + ((39-j) * 4) + (pixel * 2) + 1] =  color & 0xFF;        // Low byte
+                uint16_t color0, color1;
+                uint8_t colorID;
+                
+                // Flip pixel order for mirroring
+                colorID = (packed >> 4) & 0x0F;
+                color1 = spi_return_colour_from_pallete(colorID);  // Automatically changes between 12-bit and 16-bit color based on COLOR16 define
+
+                colorID = packed & 0x0F;
+                color0 = spi_return_colour_from_pallete(colorID);  // Automatically changes between 12-bit and 16-bit color based on COLOR16 define
+
+                if (COLOR16) {
+                    plane_buffer[(i * 160) + ((39-j) * 4)]     = (color0 >> 8) & 0xFF;  // High byte
+                    plane_buffer[(i * 160) + ((39-j) * 4) + 1] =  color0 & 0xFF;        // Low byte
+                    plane_buffer[(i * 160) + ((39-j) * 4) + 2] = (color1 >> 8) & 0xFF;  // High byte
+                    plane_buffer[(i * 160) + ((39-j) * 4) + 3] =  color1 & 0xFF;        // Low byte
+                } else {
+                    // Pack two 12-bit colors into 3 bytes
+                    plane_buffer[(i * 120) + ((39-j) * 3)]     =  (color0 >> 4) & 0xFF;          // P0 bits [11:4]
+                    plane_buffer[(i * 120) + ((39-j) * 3) + 1] = ((color0 & 0x0F) << 4) | ((color1 >> 8) & 0x0F);  // P0[3:0] | P1[11:8]
+                    plane_buffer[(i * 120) + ((39-j) * 3) + 2] =   color1 & 0xFF;                // P1 bits [7:0]
                 }
             }
         }
@@ -462,8 +541,13 @@ void draw_plane_buffer(int num) {
     // DC high for data mode
     gpio_set_level(PIN_NUM_DC, 1);
 
-    // Send plane buffer in chunks (automatically handles splitting)
-    spi_transfer_batch(plane_buffer, (80 * 48) * 2);
+    if (COLOR16) {
+        // Send plane buffer in chunks (automatically handles splitting)
+        spi_transfer_batch(plane_buffer, (80 * 48) * 2);
+    } else {
+        // Send plane buffer in chunks (automatically handles splitting)
+        spi_transfer_batch(plane_buffer, (80 * 48 / 2) * 3);
+    }
 }
 
 
