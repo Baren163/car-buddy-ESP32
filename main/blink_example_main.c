@@ -58,9 +58,6 @@ uint16_t ROW = 0;
 int drawImageY = 35;
 
 
-uint8_t mem_data[20];
-
-
 // Initialize SPI peripheral
 void spi_init(void) {
     spi_bus_config_t bus_cfg = {
@@ -98,6 +95,10 @@ void spi_init(void) {
 
 // Batch transfer with chunking for large data
 void spi_transfer_batch(const uint8_t *data, size_t length) {
+
+    // DC high for data mode
+    gpio_set_level(PIN_NUM_DC, 1);
+
     size_t bytes_sent = 0;
     
     while (bytes_sent < length) {
@@ -145,28 +146,24 @@ void spi_write_data(uint8_t data) {
 }
 
 // Write constant color multiple times (16-bit color)
-void spi_write_x_constant_colour(uint8_t data, uint16_t x) {
-    // For 16-bit color, we need to send each color byte twice
-    uint8_t* tx_buffer = malloc(x * 2);
-    if (tx_buffer == NULL) return;
+void spi_write_x_constant_colour(uint16_t data, uint16_t x) {
+    if (frame_buffer == NULL) return;
     
-    // Fill buffer with constant color
+    // Fill buffer quickly (2 bytes per pixel, 16-bit color)
+    uint16_t *buffer_16 = (uint16_t*)frame_buffer;
     for (int i = 0; i < x; i++) {
-        tx_buffer[i * 2] = data;      // High byte
-        tx_buffer[i * 2 + 1] = data;  // Low byte
+        buffer_16[i] = data;
     }
     
     gpio_set_level(PIN_NUM_DC, 1);  // Data mode
     
     spi_transaction_t trans = {
         .length = x * 16,      // Total bits (x * 2 bytes * 8 bits)
-        .tx_buffer = tx_buffer,
+        .tx_buffer = frame_buffer,
         .rx_buffer = NULL
     };
     
     ESP_ERROR_CHECK(spi_device_transmit(spi_handle, &trans));
-    
-    free(tx_buffer);
 }
 
 
@@ -189,7 +186,7 @@ void screen_init(void) {
     }
 
     // Allocate DMA-capable frame buffer for plane image
-    plane_buffer = heap_caps_malloc((48*80)*2, MALLOC_CAP_DMA);
+    plane_buffer = heap_caps_malloc((48*80)*2, MALLOC_CAP_DMA); // 48 rows * 80 pixels per row * 2 bytes per pixel
     if (plane_buffer == NULL) {
         ESP_LOGE("SCREEN", "Failed to allocate frame buffer!");
         return;
@@ -405,7 +402,6 @@ void updateFrameBuffer(uint16_t color) {
 
 float read_mpu(mpu6050_dev_t *dev)
 {
-    float temp;
     mpu6050_raw_acceleration_t accel = { 0 };
 
     ESP_ERROR_CHECK(mpu6050_get_raw_acceleration(dev, &accel));
@@ -438,24 +434,17 @@ esp_err_t eeprom_sequential_read_from_register(uint16_t read_addr, uint8_t *data
 void update_plane_buffer(uint16_t reg_index) {
     if (plane_buffer == NULL) return;
 
-    uint16_t *buffer_16 = (uint16_t*)plane_buffer;
+    eeprom_sequential_read_from_register(reg_index, plane_buffer, 1920);    // Storing the data directly into the plane_buffer to save memory and avoid an extra copy. We will convert the data in place in the plane_buffer.
 
-    for (int k = 0; k < 3; k++) {
-        // Read 160 bytes from eeprom starting at reg_index into mem_data
-        eeprom_sequential_read_from_register(reg_index + (k * 160), mem_data, 160);
+    // Go through the entire plane_buffer and convert each byte (which is a pallete index) into its corresponding colour.
+    uint16_t color = 0;
 
-        // Go through each element of mem_data and split each element (byte) into its bits and convert to colour then store in plane_buffer
-        int colourID = 0;
-        for (int i = 0; i < 160; i++) {
-            for (int j = 0; j < 2; j++) {
-                if (j == 0) {
-                    colourID = spi_return_colour_from_pallete(mem_data[i] >> 4);
-                } else {
-                    colourID = spi_return_colour_from_pallete(mem_data[i] & 0b00001111);
-                }
-                buffer_16[(i * 2) + j] = colourID;
-            }
-        }
+    for (int i = 0; i < (48*80); i++) {
+        printf("%d ", plane_buffer[i]);
+        color = spi_return_colour_from_pallete(plane_buffer[i]);
+        // Now we need to convert this 16-bit colour into two bytes and store it back in the plane_buffer. We will store the high byte first and then the low byte (big endian format) as this is what the display expects.
+        plane_buffer[i*2] = (color >> 8) & 0xFF;  // High byte
+        plane_buffer[(i*2) + 1] = color & 0xFF;     // Low byte
     }
 
 }
@@ -491,43 +480,67 @@ void app_main(void)
 
     ESP_ERROR_CHECK(i2c_dev_create_mutex(&eeprom_dev));
 
-    int offset = 0;
-
 
     // Initialize the screen
     screen_init();
 
-    updateFrameBuffer(0x0000);
-    // Draw entire screen in one DMA transfer
-    drawBackground();
+    // updateFrameBuffer(0x0000);
+    // // Draw entire screen in one DMA transfer
+    // drawBackground();
     
-    //update_plane_buffer(0);
+    update_plane_buffer(0);
+
+    bool up = true;
+
+    REG = 10000;
 
 
     while (1)
     {
 
-        //eeprom_sequential_read_from_register(16000, mem_data, 20);
-        eeprom_sequential_read_from_register(REG, mem_data, 20);
-
-        // Go through each element of mem_data and split each element (byte) into its bits and print them. Print 8 elements like this on a single line then make a new line
-        for (int k = 0; k < 2; k++) {
-            for (int i = 0; i < 10; i++) {
-                for (int j = 0; j < 8; j++) {
-                    printf("%d", ((mem_data[i+(k*10)] >> (7 - j)) & 1));
-                }
-            }
-            printf("\n");
-        }
 
 
+        //spi_write_x_constant_colour((uint16_t)AccelY*1000, 100);
 
-        AccelY = read_mpu(&mpu_dev);
-        printf("%f\n", AccelY);
+        // eeprom_sequential_read_from_register(REG, mem_data, 320);
+
+        // // // Go through each element of mem_data and split each element (byte) into its bits and print them. Print 8 elements like this on a single line then make a new line
+        // for (int k = 0; k < 32; k++) {
+        //     for (int i = 0; i < 10; i++) {
+        //         for (int j = 0; j < 8; j++) {
+        //             printf("%d", ((mem_data[i+(k*10)] >> (7 - j)) & 1));
+        //         }
+        //     }
+        //     printf("\n");
+        // }
+
+        // spi_transfer_batch(mem_data, 320);
+
+        // REG += 320;
+
+        draw_plane_buffer();
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+
+        // if (up) {
+        //     pos += 1;
+        // } else {
+        //     pos -= 1;
+        // }
+
+        // if (pos > 70) {
+        //     up = false;
+        // } else if (pos < 1) {
+        //     up = true;
+        // }
+
+        // AccelY = read_mpu(&mpu_dev);
+        // printf("%f\n", AccelY);
         // // AccelY += 48;
 
-        updateFrameBuffer(AccelY * 1000);
-        drawBackground();
+        // updateFrameBuffer(AccelY * 1000);
+        // drawBackground();
 
 
 
@@ -542,9 +555,6 @@ void app_main(void)
         // Draw whole plane_buffer at a certain pos
         //draw_plane_buffer();
         
-
-
-        vTaskDelay(pdMS_TO_TICKS(100));
 
         //pos = (0.9*pos) + (0.1*AccelY);
 
