@@ -339,42 +339,6 @@ uint16_t spi_return_colour_from_pallete(uint8_t palleteID) {
 }
 
 
-void drawRowPalleteIndexing(uint8_t* rowArray) {
-
-    int colourID = 0;
-
-    gpio_set_level(PIN_NUM_DC, 1);  // Data mode (DC HIGH)
-
-    if (reverseBool == 0) {
-    for (int reg = 0; reg < 160; reg++) {
-        for (int pixel = 0; pixel < 2; pixel++) {
-        if (pixel == 0) {
-            colourID = (rowArray[reg] >> 4);
-        } else {
-            colourID = (rowArray[reg] & 0b00001111);
-        }
-        //spi_transfer_colour_from_pallete((uint8_t)colourID);
-        }
-    }
-    } else {
-    for (int row = 0; row < 4; row++) {
-        for (int reg = 39; reg >= 0; reg--) {
-        for (int pixel = 1; pixel >= 0; pixel--) {
-            if (pixel == 0) {
-            colourID = (rowArray[(row*40) + reg] >> 4);
-            } else {
-            colourID = (rowArray[(row*40) + reg] & 0b00001111);
-            }
-            //spi_transfer_colour_from_pallete(colourID);
-        }
-        }
-    }
-    }
-
-
-}
-
-
 void drawBackground() {
     if (frame_buffer == NULL) return;
     
@@ -409,7 +373,7 @@ float read_mpu(mpu6050_dev_t *dev)
     // ESP_LOGI("MPU", "Accel: x=%.4f y=%.4f z=%.4f",
     //          accel.x, accel.y, accel.z);
     
-    return accel.y;
+    return accel.x;
 }
 
 
@@ -432,29 +396,74 @@ esp_err_t eeprom_sequential_read_from_register(uint16_t read_addr, uint8_t *data
 
 
 void update_plane_buffer(uint16_t reg_index) {
-    if (plane_buffer == NULL) return;
 
-    eeprom_sequential_read_from_register(reg_index, plane_buffer, 1920);    // Storing the data directly into the plane_buffer to save memory and avoid an extra copy. We will convert the data in place in the plane_buffer.
-
-    // Go through the entire plane_buffer and convert each byte (which is a pallete index) into its corresponding colour.
-    uint16_t color = 0;
-
-    for (int i = 0; i < (48*80); i++) {
-        printf("%d ", plane_buffer[i]);
-        color = spi_return_colour_from_pallete(plane_buffer[i]);
-        // Now we need to convert this 16-bit colour into two bytes and store it back in the plane_buffer. We will store the high byte first and then the low byte (big endian format) as this is what the display expects.
-        plane_buffer[i*2] = (color >> 8) & 0xFF;  // High byte
-        plane_buffer[(i*2) + 1] = color & 0xFF;     // Low byte
+    if (plane_buffer == NULL) {
+        return;
     }
 
+    // Read packed data into the START of plane_buffer (1920 bytes used, rest untouched for now)
+    eeprom_sequential_read_from_register(reg_index, plane_buffer, 1920);
+
+    uint8_t packed, colorID;
+    uint16_t color;
+
+    if (reverseBool == 0) {
+        // Iterate backwards so writes never clobber unread packed bytes
+        for (int i = ((48 * 80) / 2) - 1; i >= 0; i--) {
+            packed = plane_buffer[i];  // Read packed byte BEFORE it gets overwritten
+            for (int pixel = 1; pixel >= 0; pixel--) {
+                colorID = (pixel == 0) ? (packed >> 4) : (packed & 0x0F);
+                color = spi_return_colour_from_pallete(colorID);
+
+                plane_buffer[(i * 4) + (pixel * 2)]     = (color >> 8) & 0xFF;  // High byte
+                plane_buffer[(i * 4) + (pixel * 2) + 1] =  color & 0xFF;        // Low byte
+            }
+        }
+    } else {
+        // Image is already stored a certain way in eeprom so I need to rewrite/convert the colorIDs in a way where each row of the image is reversed
+        //making the plane appear mirrored on the display while still preventing clobbering of unread packed bytes
+        // Iterate backwards so writes never clobber unread packed bytes
+        for (int i = (48 - 1); i >= 0; i--) {
+            if (i == 0) {
+                // For the first row, we need to read the packed bytes before we overwrite them, so we read them into a temporary buffer
+                uint8_t temp_buffer[80/2];  // 40 packed bytes for 80 pixels
+                for (int j = 0; j < 80/2; j++) {
+                    temp_buffer[j] = plane_buffer[(i * 40) + j];
+                }
+                // Now we can safely write to the plane_buffer without worrying about clobbering unread data
+                 for (int j = 0; j < 80/2; j++) {
+                    packed = temp_buffer[j];
+                    for (int pixel = 1; pixel >= 0; pixel--) {
+                        colorID = (pixel == 1) ? (packed >> 4) : (packed & 0x0F);   // Flip pixel order for mirroring
+                        color = spi_return_colour_from_pallete(colorID);
+
+                        plane_buffer[(i * 160) + ((39-j) * 4) + (pixel * 2)]     = (color >> 8) & 0xFF;  // High byte
+                        plane_buffer[(i * 160) + ((39-j) * 4) + (pixel * 2) + 1] =  color & 0xFF;        // Low byte
+                    }
+                }
+                break;  // We've processed the first row, we can break out of the loop now
+            }
+
+            for (int j = 0; j < 80/2; j++) {
+                packed = plane_buffer[(i * 40) + j];
+                for (int pixel = 1; pixel >= 0; pixel--) {
+                    colorID = (pixel == 1) ? (packed >> 4) : (packed & 0x0F);   // Flip pixel order for mirroring
+                    color = spi_return_colour_from_pallete(colorID);
+
+                    plane_buffer[(i * 160) + ((39-j) * 4) + (pixel * 2)]     = (color >> 8) & 0xFF;  // High byte
+                    plane_buffer[(i * 160) + ((39-j) * 4) + (pixel * 2) + 1] =  color & 0xFF;        // Low byte
+                }
+            }
+        }
+    }
 }
 
 
-void draw_plane_buffer() {
+void draw_plane_buffer(int num) {
     if (plane_buffer == NULL) return;
 
     // Set address window for the plane
-    spi_set_addr_window(0, drawImageY, 79, drawImageY + 47);
+    spi_set_addr_window(0 + num, drawImageY, 79 + num, drawImageY + 47);
 
     // DC high for data mode
     gpio_set_level(PIN_NUM_DC, 1);
@@ -475,7 +484,7 @@ void app_main(void)
     // Init 24LC256 eeprom i2c dev with i2cdev.h library (one level lower than mpu6050, no wrapper library)
     eeprom_dev.cfg.sda_io_num = SDA_PIN;
     eeprom_dev.cfg.scl_io_num = SCL_PIN;
-    eeprom_dev.cfg.master.clk_speed = 100000;
+    eeprom_dev.cfg.master.clk_speed = 400000;
     eeprom_dev.addr = EEPROM_ADDR;
 
     ESP_ERROR_CHECK(i2c_dev_create_mutex(&eeprom_dev));
@@ -484,113 +493,60 @@ void app_main(void)
     // Initialize the screen
     screen_init();
 
-    // updateFrameBuffer(0x0000);
-    // // Draw entire screen in one DMA transfer
-    // drawBackground();
+    updateFrameBuffer(0x0000);
+    // Draw entire screen in one DMA transfer
+    drawBackground();
     
     update_plane_buffer(0);
 
-    bool up = true;
-
-    REG = 10000;
+    int counter = 0;
 
 
     while (1)
     {
 
+        draw_plane_buffer(pos);
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        AccelY = read_mpu(&mpu_dev);
+
+        // Map [-17000, +17000] to [0, 90]
+        if (AccelY < -17000) AccelY = -17000;
+        if (AccelY > 17000) AccelY = 17000;
+        pos = (((int)AccelY + 17000) / 424);
+
+        // pos = (0.9*pos) + (0.1*AccelY);
+
+        if (pos < 40) {
+        reverseBool = 1;
+        } else {
+        reverseBool = 0;
+        }
 
 
-        //spi_write_x_constant_colour((uint16_t)AccelY*1000, 100);
+        counter++;
 
-        // eeprom_sequential_read_from_register(REG, mem_data, 320);
-
-        // // // Go through each element of mem_data and split each element (byte) into its bits and print them. Print 8 elements like this on a single line then make a new line
-        // for (int k = 0; k < 32; k++) {
-        //     for (int i = 0; i < 10; i++) {
-        //         for (int j = 0; j < 8; j++) {
-        //             printf("%d", ((mem_data[i+(k*10)] >> (7 - j)) & 1));
-        //         }
-        //     }
-        //     printf("\n");
-        // }
-
-        // spi_transfer_batch(mem_data, 320);
-
-        // REG += 320;
-
-        draw_plane_buffer();
-
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
-
-        // if (up) {
-        //     pos += 1;
-        // } else {
-        //     pos -= 1;
-        // }
-
-        // if (pos > 70) {
-        //     up = false;
-        // } else if (pos < 1) {
-        //     up = true;
-        // }
-
-        // AccelY = read_mpu(&mpu_dev);
-        // printf("%f\n", AccelY);
-        // // AccelY += 48;
-
-        // updateFrameBuffer(AccelY * 1000);
-        // drawBackground();
-
-
-
-        // I want to read the whole plane image (1920 bytes / registers) into the plane_buffer at once and then batch transfer the whole buffer using DMA.
-        // But I want to store the image into memory as its converted / indexed color. Remeber that you only actually need to update the buffer with a new
-        //plane image when the plane changes orientation.
-
-        // Read a chunk from eeprom and store in mem_data
-
-        // Go through the chunk converting each one to its color and storing it in the plane_buffer
-
-        // Draw whole plane_buffer at a certain pos
-        //draw_plane_buffer();
-        
-
-        //pos = (0.9*pos) + (0.1*AccelY);
-
-        // if (pos < 40) {
-        // reverseBool = 1;
-        // } else {
-        // reverseBool = 0;
-        // }
-
-
-        // eeprom_sequential_read_from_register((REG + (ROW*40)), mem_data, 160);
-        
-        // spi_set_addr_window(0+pos, (drawImageY + ROW), 79+pos, (drawImageY + ROW+3));
-        // drawRowPalleteIndexing(mem_data);
-
-        // ROW += 4; // Reading 160 registers so with 4 bit pallete indexing (16 unique colours) thats 320 pixels. With 80 pixels in a row thats 4 rows so we need 12 reads for a full image (48 rows)
-
-        // if (ROW == 48) {
-        //     ROW = 0;
-        //     if (abs(pos - 40) < 5) {
-        //         update_plane_buffer(0);
-        //     } else if (abs(pos - 40) < 10) {
-        //         update_plane_buffer(1920);
-        //     } else if (abs(pos - 40) < 15) {
-        //         update_plane_buffer(3840);
-        //     } else if (abs(pos - 40) < 20) {
-        //         update_plane_buffer(5760);
-        //     } else if (abs(pos - 40) < 25) {
-        //         update_plane_buffer(7680);
-        //     } else if (abs(pos - 40) < 30) {
-        //         update_plane_buffer(9600);
-        //     } else if (abs(pos - 40) < 35) {
-        //         update_plane_buffer(11520);
-        //     } else {
-        //         update_plane_buffer(13440);
-        //     }
+        if (counter >= 5) {  // Update every so often
+            counter = 0;
+            if (abs(pos - 40) < 5) {
+                update_plane_buffer(0);
+            } else if (abs(pos - 40) < 10) {
+                update_plane_buffer(1920);
+            } else if (abs(pos - 40) < 15) {
+                update_plane_buffer(3840);
+            } else if (abs(pos - 40) < 20) {
+                update_plane_buffer(5760);
+            } else if (abs(pos - 40) < 25) {
+                update_plane_buffer(7680);
+            } else if (abs(pos - 40) < 30) {
+                update_plane_buffer(9600);
+            } else if (abs(pos - 40) < 35) {
+                update_plane_buffer(11520);
+            } else {
+                update_plane_buffer(13440);
+            }
+        }
 
             
             // countDown--;  // Clear the side-debris
